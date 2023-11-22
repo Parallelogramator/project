@@ -1,9 +1,20 @@
 import sys
 from PyQt6 import QtWidgets, QtCore, QtGui
-from PyQt6.QtSql import QSqlDatabase, QSqlTableModel, QSqlRecord, QSqlQuery
+from PyQt6.QtSql import QSqlDatabase, QSqlTableModel, QSqlQuery
 import os
 from sql import Ui_Form as sql
 from filter import FilterDialog
+
+class ImageDialog(QtWidgets.QDialog):
+    def __init__(self, data, parent=None):
+        super().__init__(parent)
+        self.label = QtWidgets.QLabel(self)
+
+        pixmap = QtGui.QPixmap()
+        pixmap.loadFromData(data)
+
+        self.label.setPixmap(pixmap)
+
 
 
 class DbViewer(QtWidgets.QMainWindow):
@@ -17,13 +28,16 @@ class DbViewer(QtWidgets.QMainWindow):
         if not db.open():
             print(f"Cannot open database: {db.lastError().text()}")
             exit()
+
+
         self.db = db
         self.table_model = QSqlTableModel(db=self.db)
+
         self.proxy_model = QtCore.QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.table_model)
 
         self.tables = []
-        self.next_index = 1
+        self.next_index = 0
 
         query = QSqlQuery()
         query.exec('SELECT name FROM sqlite_master WHERE type="table"')
@@ -42,6 +56,11 @@ class DbViewer(QtWidgets.QMainWindow):
         toolbar = QtWidgets.QToolBar()
         self.addToolBar(toolbar)
 
+        self.table_combo_box = QtWidgets.QComboBox()
+        self.table_combo_box.addItems(self.tables)
+        self.table_combo_box.currentIndexChanged.connect(self.update_table)
+        toolbar.addWidget(self.table_combo_box)
+
         add_action = QtGui.QAction("Add", self)
         add_action.triggered.connect(self.add_user)
         toolbar.addAction(add_action)
@@ -54,9 +73,6 @@ class DbViewer(QtWidgets.QMainWindow):
         filter_action.triggered.connect(self.filter_data)
         toolbar.addAction(filter_action)
 
-        switch_view_action = QtGui.QAction("Switch View", self)
-        switch_view_action.triggered.connect(self.switch_view)
-        toolbar.addAction(switch_view_action)
 
         execute_sql_action = QtGui.QAction("Execute SQL", self)
         execute_sql_action.triggered.connect(self.execute_sql)
@@ -66,22 +82,56 @@ class DbViewer(QtWidgets.QMainWindow):
         reset_action.triggered.connect(self.reset_table)
         toolbar.addAction(reset_action)
 
+
+        self.table_view.doubleClicked.connect(self.show_image)
+
+
     def select_database(self):
-        # Открываем QFileDialog в текущей директории
-        file_dialog = QtWidgets.QFileDialog(self)
-        file_dialog.setDirectory(QtCore.QDir.currentPath())
+            options = QtWidgets.QFileDialog(self).options()
+            fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self, "QFileDialog.getOpenFileName()", "",
+                                                                "SQLite Files (*.db);;CSV Files (*.csv)",
+                                                                options=options)
+            if fileName:
+                if fileName.endswith('.csv'):
+                    try:
+                        db = fileName[:-4]
+                        import csv
+                        import sqlite3
 
-        # Позволяем пользователю выбирать только файлы
-        file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+                        # Создайте соединение с новой базой данных SQLite
+                        conn = sqlite3.connect(f'{db}.db')
+                        cur = conn.cursor()
+                        query = ''
+                        # Откройте CSV-файл и прочитайте первую строку, чтобы получить имена столбцов
+                        with open(fileName, 'r', encoding='utf-8') as csv_file:
+                            csv_reader = csv.reader(csv_file, delimiter=';', quotechar='"')
+                            column_names = next(csv_reader)
+                            query = f"CREATE TABLE {db.split('/')[-1]} ( {', '.join([f'{name} TEXT' for name in column_names])})"
+                            # Создайте строку SQL для создания таблицы
+                            cur.execute(query)
 
-        # Устанавливаем фильтр для файлов баз данных SQLite
-        file_dialog.setNameFilter("SQLite databases (*.db)")
-        if file_dialog.exec() == 1:
-            # Если пользователь выбрал файл, возвращаем его полный путь
-            return file_dialog.selectedFiles()[0]
-        else:
-            # Если пользователь отменил выбор, валим от него
-            exit()
+                            # Вставьте данные из CSV-файла в таблицу
+                            for row in csv_reader:
+                                query = f"INSERT INTO {db.split('/')[-1]} VALUES ({', '.join(['?' for _ in column_names])})"
+                                cur.execute(query, row)
+
+                        # Сохраните изменения и закройте соединение
+                        conn.commit()
+
+
+                        return f'{db}.db'
+                    except Exception as err:
+                        error = ('Query Failed: %s\nError: %s' % (query, str(err)))
+                        QtWidgets.QMessageBox.critical(self, "SQL",
+                                                       error)
+                    finally:
+                        conn.close()
+                else:
+                    return fileName
+            else:
+                exit()
+
+
 
     def initialize_db(self):
         # Создаем объект QTableView
@@ -103,6 +153,7 @@ class DbViewer(QtWidgets.QMainWindow):
         self.table_view.setSortingEnabled(True)
         # Сортируем данные по возрастанию в первом столбце
         self.proxy_model.sort(0, QtCore.Qt.SortOrder.AscendingOrder)
+
 
     def add_user(self):
         # Создаем список заголовков для диалогового окна
@@ -132,7 +183,7 @@ class DbViewer(QtWidgets.QMainWindow):
         # Привязываем значения к запросу
         for i, value in enumerate(data):
             query.bindValue(":value" + str(i), value)
-
+        query.exec()
         # Переинициализируем базу данных
         self.initialize_db()
 
@@ -148,7 +199,7 @@ class DbViewer(QtWidgets.QMainWindow):
                 source_index = self.proxy_model.mapToSource(index)
                 self.table_view.hideRow(index.row())
                 record = self.table_model.record(source_index.row())
-                if record.value("id") == id:
+                if record.value(0) == id:
                     # Включаем редактирование для этой строки
                     self.table_view.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.AllEditTriggers)
                     self.table_view.setCurrentIndex(index)
@@ -182,10 +233,10 @@ class DbViewer(QtWidgets.QMainWindow):
         self.update_table()
 
     def update_table(self):
-        # Переключаем индекс на следующую таблицу
-        self.next_index = (self.next_index + 1) % len(self.tables)
-        # Получаем имя следующей таблицы
-        table_name = self.tables[int(self.next_index)]
+        # Получаем имя выбранной таблицы
+        table_name = self.table_combo_box.currentText()
+
+        self.next_index = self.tables.index(table_name)
         # Устанавливаем эту таблицу для модели
         self.table_model.setTable(table_name)
         # Выполняем выборку данных
@@ -209,6 +260,20 @@ class DbViewer(QtWidgets.QMainWindow):
     def reset_table(self):
             # Сбрасываем представление таблицы до исходной модели таблицы
             self.initialize_db()
+
+    def show_image(self, index):
+        try:
+            print(index.data())
+
+            # Получите данные из выбранной ячейки
+            # Если данные являются экземпляром QByteArray (что означает, что это изображение),
+            # откройте диалоговое окно с изображением
+            if isinstance(index.data(), QtCore.QByteArray):
+                self.dialog = ImageDialog(index.data(), self)
+                self.dialog.show()
+            print(1)
+        except Exception:
+            pass
 
 
 def main():
